@@ -9,6 +9,7 @@ SERVICE=$2
 service_dir=$ROOT/$SERVICE
 tests_dir=$service_dir/tests/unit
 build_dir=$service_dir/build
+reports_dir=${REPORTS_DIR:-$ROOT/reports}
 
 display_usage () {
     echo "Usage: $0 TYPE SERVICE"
@@ -75,8 +76,10 @@ tests_python3 () {
     AWS_SECRET_ACCESS_KEY=AWS_SECRET_ACCESS_KEY \
     AWS_DEFAULT_REGION=eu-west-1 \
     pytest $tests_dir \
+        --override-ini junit_family=xunit2 \
         --cov $build_dir \
-        --cov-config $ROOT/shared/tests/unit/coveragerc
+        --cov-config $ROOT/shared/tests/unit/coveragerc \
+        --junitxml $reports_dir/${SERVICE}-unit.xml
 }
 
 type tests_$TYPE | grep -q "function" &>/dev/null || {

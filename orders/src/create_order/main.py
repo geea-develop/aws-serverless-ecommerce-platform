@@ -4,6 +4,7 @@ CreateOrderFunction
 
 
 import asyncio
+import concurrent
 import datetime
 import json
 import os
@@ -15,20 +16,24 @@ import jsonschema
 import requests
 from aws_requests_auth.boto_utils import BotoAWSRequestsAuth
 from aws_lambda_powertools.tracing import Tracer # pylint: disable=import-error
-from aws_lambda_powertools.logging import logger_setup, logger_inject_lambda_context # pylint: disable=import-error
+from aws_lambda_powertools.logging.logger import Logger # pylint: disable=import-error
+from aws_lambda_powertools import Metrics # pylint: disable=import-error
+from aws_lambda_powertools.metrics import MetricUnit # pylint: disable=import-error
 
 
 ENVIRONMENT = os.environ["ENVIRONMENT"]
 SCHEMA_FILE = os.path.join(os.path.dirname(__file__), "schema.json")
 TABLE_NAME = os.environ["TABLE_NAME"]
 DELIVERY_API_URL = os.environ["DELIVERY_API_URL"]
+PAYMENT_API_URL = os.environ["PAYMENT_API_URL"]
 PRODUCTS_API_URL = os.environ["PRODUCTS_API_URL"]
 
 
 dynamodb = boto3.resource("dynamodb") # pylint: disable=invalid-name
 table = dynamodb.Table(TABLE_NAME) # pylint: disable=invalid-name,no-member
-logger = logger_setup() # pylint: disable=invalid-name
+logger = Logger() # pylint: disable=invalid-name
 tracer = Tracer() # pylint: disable=invalid-name
+metrics = Metrics(namespace="ecommerce.orders") # pylint: disable=invalid-name
 
 
 with open(SCHEMA_FILE) as fp:
@@ -36,7 +41,7 @@ with open(SCHEMA_FILE) as fp:
 
 
 @tracer.capture_method
-async def validate_delivery(order: dict) -> Tuple[bool, str]:
+def validate_delivery(order: dict) -> Tuple[bool, str]:
     """
     Validate the delivery price
     """
@@ -82,17 +87,53 @@ async def validate_delivery(order: dict) -> Tuple[bool, str]:
 
 
 @tracer.capture_method
-async def validate_payment(order: dict) -> Tuple[bool, str]:
+def validate_payment(order: dict) -> Tuple[bool, str]:
     """
     Validate the payment token
     """
 
-    # TODO
-    return (True, "")
+    # Gather the domain name and AWS region
+    url = urlparse(PAYMENT_API_URL)
+    region = boto3.session.Session().region_name
+    # Create the signature helper
+    iam_auth = BotoAWSRequestsAuth(aws_host=url.netloc,
+                                   aws_region=region,
+                                   aws_service='execute-api')
+
+    # Send a POST request
+    response = requests.post(
+        PAYMENT_API_URL+"/backend/validate",
+        json={"paymentToken": order["paymentToken"], "total": order["total"]},
+        auth=iam_auth
+    )
+
+    logger.debug({
+        "message": "Response received from payment",
+        "body": response.json()
+    })
+
+    body = response.json()
+    if response.status_code != 200 or "ok" not in body:
+        logger.warning({
+            "message": "Failure to contact the payment service",
+            "statusCode": response.status_code,
+            "body": body
+        })
+        return (False, "Failure to contact the payment service")
+
+    if not body["ok"]:
+        logger.info({
+            "message": "Wrong payment token",
+            "paymentToken": order["paymentToken"],
+            "total": order["total"]
+        })
+        return (False, "Wrong payment token")
+
+    return (True, "The payment token is valid")
 
 
 @tracer.capture_method
-async def validate_products(order: dict) -> Tuple[bool, str]:
+def validate_products(order: dict) -> Tuple[bool, str]:
     """
     Validate the products in the order
     """
@@ -127,12 +168,16 @@ async def validate(order: dict) -> List[str]:
     """
 
     error_msgs = []
-    for valid, error_msg in await asyncio.gather(
-            validate_delivery(order),
-            validate_payment(order),
-            validate_products(order)):
-        if not valid:
-            error_msgs.append(error_msg)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as executor:
+        futures = [
+            executor.submit(validate_delivery, order),
+            executor.submit(validate_payment, order),
+            executor.submit(validate_products, order)
+        ]
+        for future in concurrent.futures.as_completed(futures):
+            valid, error_msg = future.result()
+            if not valid:
+                error_msgs.append(error_msg)
 
     if error_msgs:
         logger.info({
@@ -190,7 +235,8 @@ def store_order(order: dict) -> None:
     table.put_item(Item=order)
 
 
-@logger_inject_lambda_context
+@metrics.log_metrics(raise_on_empty_metrics=False)
+@logger.inject_lambda_context
 @tracer.capture_lambda_handler
 def handler(event, _):
     """
@@ -248,25 +294,11 @@ def handler(event, _):
         "orderId": order["orderId"],
         "order": order
     })
-    # Generate custom metrics using the Embedded Metric Format
-    # See https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch_Embedded_Metric_Format_Specification.html
-    print(json.dumps({
-        "orderCreatedTotal": order["total"],
-        "orderCreated": 1,
-        "environment": ENVIRONMENT,
-        "_aws": {
-            # Timestamp is in milliseconds
-            "Timestamp": int(datetime.datetime.now().timestamp()*1000),
-            "CloudWatchMetrics": [{
-                "Namespace": "ecommerce.orders",
-                "Dimensions": [["environment"]],
-                "Metrics": [
-                    {"Name": "orderCreatedTotal"},
-                    {"Name": "orderCreated"}
-                ]
-            }]
-        }
-    }))
+
+    # Add custom metrics
+    metrics.add_dimension(name="environment", value=ENVIRONMENT)
+    metrics.add_metric(name="orderCreated", unit=MetricUnit.Count, value=1)
+    metrics.add_metric(name="orderCreatedTotal", unit=MetricUnit.Count, value=order["total"])
 
     return {
         "success": True,

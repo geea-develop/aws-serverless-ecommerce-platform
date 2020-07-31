@@ -6,9 +6,12 @@ TableUpdateFunction
 import datetime
 import json
 import os
+import warnings
 from typing import List, Optional
 from aws_lambda_powertools.tracing import Tracer
-from aws_lambda_powertools.logging import logger_setup, logger_inject_lambda_context
+from aws_lambda_powertools.logging.logger import Logger
+from aws_lambda_powertools import Metrics
+from aws_lambda_powertools.metrics import MetricUnit
 import boto3
 from boto3.dynamodb.conditions import Key
 from boto3.dynamodb.types import TypeDeserializer
@@ -25,8 +28,15 @@ dynamodb = boto3.resource("dynamodb") # pylint: disable=invalid-name
 eventbridge = boto3.client("events") # pylint: disable=invalid-name
 table = dynamodb.Table(TABLE_NAME) # pylint: disable=invalid-name,no-member
 type_deserializer = TypeDeserializer() # pylint: disable=invalid-name
-logger = logger_setup() # pylint: disable=invalid-name
+logger = Logger() # pylint: disable=invalid-name
 tracer = Tracer() # pylint: disable=invalid-name
+metrics = Metrics(namespace="ecommerce.warehouse", service="warehouse")
+
+
+event_type_to_metric = {
+    'PackageCreated':'packageCreated',
+    'PackagingFailed':'packagingFailed'
+}
 
 
 @tracer.capture_method
@@ -37,7 +47,9 @@ def send_events(events: List[dict]):
 
     if len(events) > 0:
         logger.info("Sending %d events to EventBridge", len(events))
-        eventbridge.put_events(Entries=events)
+        # EventBridge only supports batches of up to 10 events
+        for i in range(0, len(events), 10):
+            eventbridge.put_events(Entries=events[i:i+10])
     else:
         logger.info("Skip sending %d event to EventBridge", len(events))
 
@@ -68,6 +80,8 @@ def parse_record(ddb_record: dict) -> Optional[dict]:
     if len(products) > 0:
         detail_type = "PackageCreated"
         detail["products"] = products
+
+    metrics.add_metric(name=event_type_to_metric[detail_type], unit=MetricUnit.Count, value=1)
 
     # Return event
     return {
@@ -116,12 +130,18 @@ def get_products(order_id: str) -> List[dict]:
     return products
 
 
-@logger_inject_lambda_context
+@metrics.log_metrics
+@logger.inject_lambda_context
 @tracer.capture_lambda_handler
 def handler(event, _):
     """
     Lambda function handler for Warehouse Table stream
     """
+
+    # this handler may complete without publishing any metrics
+    warnings.filterwarnings("ignore", "No metrics to publish*")
+
+    metrics.add_dimension(name="environment", value=ENVIRONMENT)
 
     logger.debug({
         "message": "Input event",

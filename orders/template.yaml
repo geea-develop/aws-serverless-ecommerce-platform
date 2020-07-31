@@ -23,6 +23,12 @@ Parameters:
   EventBusName:
     Type: AWS::SSM::Parameter::Value<String>
     Description: EventBridge Event Bus Name
+  PaymentApiUrl:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Payment API Gateway URL
+  PaymentApiArn:
+    Type: AWS::SSM::Parameter::Value<String>
+    Description: Payment API Gateway ARN
   ProductsApiUrl:
     Type: AWS::SSM::Parameter::Value<String>
     Description: Products API Gateway URL
@@ -45,10 +51,6 @@ Globals:
         POWERTOOLS_SERVICE_NAME: orders
         POWERTOOLS_TRACE_DISABLED: "false"
         LOG_LEVEL: !Ref LogLevel
-
-
-Conditions:
-  IsNotProd: !Not [!Equals [!Ref Environment, prod]]
 
 
 Resources:
@@ -98,7 +100,9 @@ Resources:
       Environment:
         Variables:
           DELIVERY_API_URL: !Ref DeliveryApiUrl
+          PAYMENT_API_URL: !Ref PaymentApiUrl
           PRODUCTS_API_URL: !Ref ProductsApiUrl
+      MemorySize: 768
       Policies:
         - Version: "2012-10-17"
           Statement:
@@ -112,6 +116,7 @@ Resources:
               # Retrieve the order details
               Resource:
                 - !Sub "${DeliveryApiArn}/POST/*"
+                - !Sub "${PaymentApiArn}/POST/*"
                 - !Sub "${ProductsApiArn}/POST/*"
   
   CreateOrderLogGroup:
@@ -131,6 +136,7 @@ Resources:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: src/get_order/
+      MemorySize: 512
       Events:
         BackendApi:
           Type: Api
@@ -157,6 +163,7 @@ Resources:
     Properties:
       Handler: main.handler
       CodeUri: src/table_update/
+      MemorySize: 384
       Events:
         DynamoDB:
           Type: DynamoDB
@@ -275,19 +282,6 @@ Resources:
       Parameters:
         AlarmAction: !Ref AlarmTopic
 
-  ############
-  # LISTENER #
-  ############
-  Listener:
-    Type: AWS::CloudFormation::Stack
-    Condition: IsNotProd
-    Properties:
-      TemplateURL: ../../shared/templates/listener.yaml
-      Parameters:
-        Environment: !Ref Environment
-        EventBusName: !Ref EventBusName
-        ServiceName: "orders"
-
   #############
   # DASHBOARD #
   #############
@@ -329,9 +323,9 @@ Resources:
               "height": 3,
               "properties": {
                 "metrics": [
-                  ["ecommerce.orders", "orderCreated", "environment", "${Environment}", {"color": "#29b6f6", "label": "Orders Created"}],
-                  ["ecommerce.orders", "orderFulfilled", "environment", "${Environment}", {"color": "#66bb6a", "label": "Orders Fulfilled"}],
-                  ["ecommerce.orders", "orderFailed", "environment", "${Environment}", {"color": "#ef5350", "label": "Orders Failed"}]
+                  ["ecommerce.orders", "orderCreated", "environment", "${Environment}", "service", "orders", {"color": "#29b6f6", "label": "Orders Created"}],
+                  ["ecommerce.orders", "orderFulfilled", "environment", "${Environment}", "service", "orders", {"color": "#66bb6a", "label": "Orders Fulfilled"}],
+                  ["ecommerce.orders", "orderFailed", "environment", "${Environment}", "service", "orders", {"color": "#ef5350", "label": "Orders Failed"}]
                 ],
                 "view": "singleValue",
                 "period": 86400,
@@ -406,7 +400,7 @@ Resources:
               "height": 3,
               "properties": {
                 "metrics": [
-                  ["AWS/Lambda", "Duration", "FunctionName", "${CreateOrderFunction}", {"color": "#9ccc65", "label": "p50"}],
+                  ["AWS/Lambda", "Duration", "FunctionName", "${GetOrderFunction}", {"color": "#9ccc65", "label": "p50"}],
                   ["...", {"stat": "p90", "color": "#ffee58", "label": "p90"}],
                   ["...", {"stat": "p99", "color": "#ef5350", "label": "p99"}]
                 ],
@@ -459,10 +453,10 @@ Resources:
               "height": 6,
               "properties": {
                 "metrics": [
-                  ["ecommerce.orders", "orderCreated", "environment", "${Environment}", {"color": "#29b6f6", "label": "Orders Created"}],
-                  ["ecommerce.orders", "orderPackaged", "environment", "${Environment}", {"color": "#ffa726", "label": "Orders Packaged"}],
-                  ["ecommerce.orders", "orderFulfilled", "environment", "${Environment}", {"color": "#66bb6a", "label": "Orders Fulfilled"}],
-                  ["ecommerce.orders", "orderFailed", "environment", "${Environment}", {"color": "#ef5350", "label": "Orders Failed"}]
+                  ["ecommerce.orders", "orderCreated", "environment", "${Environment}", "service", "orders", {"color": "#29b6f6", "label": "Orders Created"}],
+                  ["ecommerce.orders", "orderPackaged", "environment", "${Environment}", "service", "orders", {"color": "#ffa726", "label": "Orders Packaged"}],
+                  ["ecommerce.orders", "orderFulfilled", "environment", "${Environment}", "service", "orders", {"color": "#66bb6a", "label": "Orders Fulfilled"}],
+                  ["ecommerce.orders", "orderFailed", "environment", "${Environment}", "service", "orders", {"color": "#ef5350", "label": "Orders Failed"}]
                 ],
                 "view": "timeSeries",
                 "period": 60,
@@ -968,6 +962,8 @@ Resources:
       Dimensions:
         - Name: environment
           Value: !Ref Environment
+        - Name: service
+          Value: orders
       Namespace: ecommerce.orders
       Stat: Sum
 
@@ -989,6 +985,8 @@ Resources:
               Dimensions:
                 - Name: environment
                   Value: !Ref Environment
+                - Name: service
+                  Value: orders
               MetricName: orderCreated
               Namespace: ecommerce.orders
             Period: 3600

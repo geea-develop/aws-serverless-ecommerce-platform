@@ -10,7 +10,9 @@ import boto3
 import requests # pylint: disable=import-error
 from aws_requests_auth.boto_utils import BotoAWSRequestsAuth # pylint: disable=import-error
 from aws_lambda_powertools.tracing import Tracer # pylint: disable=import-error
-from aws_lambda_powertools.logging import logger_setup, logger_inject_lambda_context # pylint: disable=import-error
+from aws_lambda_powertools.logging.logger import Logger # pylint: disable=import-error
+from aws_lambda_powertools import Metrics
+from aws_lambda_powertools.metrics import MetricUnit
 
 
 ENVIRONMENT = os.environ["ENVIRONMENT"]
@@ -20,8 +22,9 @@ TABLE_NAME = os.environ["TABLE_NAME"]
 
 dynamodb = boto3.resource("dynamodb") # pylint: disable=invalid-name
 table = dynamodb.Table(TABLE_NAME) # pylint: disable=invalid-name,no-member
-logger = logger_setup() # pylint: disable=invalid-name
+logger = Logger() # pylint: disable=invalid-name
 tracer = Tracer() # pylint: disable=invalid-name
+metrics = Metrics(namespace="ecommerce.delivery", service="delivery")
 
 
 @tracer.capture_method
@@ -91,13 +94,18 @@ def save_shipping_request(order: dict) -> None:
         "address": order["address"]
     })
 
+    metrics.add_metric(name="deliveryCreated", unit=MetricUnit.Count, value=1)
 
-@logger_inject_lambda_context
+
+@metrics.log_metrics
+@logger.inject_lambda_context
 @tracer.capture_lambda_handler
 def handler(event, context):
     """
     Lambda function handler
     """
+
+    metrics.add_dimension(name="environment", value=ENVIRONMENT)
 
     # This should only receive PackageCreated events
     assert event["source"] == "ecommerce.warehouse"
